@@ -121,6 +121,9 @@ class RobotClientConfig:
     # Task instruction for the robot to execute (e.g., 'fold my tshirt')
     task: str = field(default="", metadata={"help": "Task instruction for the robot to execute"})
 
+    # Observation key mapping sent to the policy server preprocessor.
+    rename_map: dict[str, str] = field(default_factory=dict)
+
     # Network configuration
     server_address: str = field(default="localhost:8080", metadata={"help": "Server address to connect to"})
 
@@ -198,6 +201,7 @@ class RobotClientConfig:
             "fps": self.fps,
             "actions_per_chunk": self.actions_per_chunk,
             "task": self.task,
+            "rename_map": self.rename_map,
             "debug_visualize_queue_size": self.debug_visualize_queue_size,
             "aggregate_fn_name": self.aggregate_fn_name,
         }
