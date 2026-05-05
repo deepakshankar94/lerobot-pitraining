@@ -86,6 +86,8 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         self.actions_per_chunk = None
         self.rename_map = {}
         self.policy = None
+        self._loaded_policy_key: tuple[str, str, str] | None = None
+        self._loaded_processors_key: tuple[str, str, str, tuple[tuple[str, str], ...]] | None = None
         self.preprocessor: PolicyProcessorPipeline[dict[str, Any], dict[str, Any]] | None = None
         self.postprocessor: PolicyProcessorPipeline[PolicyAction, PolicyAction] | None = None
 
@@ -102,6 +104,7 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         # only running inference on the latest observation received by the server
         self.shutdown_event.set()
         self.observation_queue = Queue(maxsize=1)
+        self.last_processed_obs = None
 
         with self._predicted_timesteps_lock:
             self._predicted_timesteps = set()
@@ -148,27 +151,65 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         self.actions_per_chunk = policy_specs.actions_per_chunk
         self.rename_map = policy_specs.rename_map
 
-        policy_class = get_policy_class(self.policy_type)
-
         start = time.perf_counter()
-        self.policy = policy_class.from_pretrained(policy_specs.pretrained_name_or_path)
-        self.policy.to(self.device)
+        policy_key = (
+            policy_specs.policy_type,
+            policy_specs.pretrained_name_or_path,
+            policy_specs.device,
+        )
+
+        if self.policy is not None and self._loaded_policy_key == policy_key:
+            self.logger.info(
+                f"Reusing cached policy on {self.device}: {policy_specs.pretrained_name_or_path}"
+            )
+        else:
+            if self.policy is not None:
+                self.logger.info("Policy config changed; unloading cached policy before reload.")
+                self.policy = None
+                self.preprocessor = None
+                self.postprocessor = None
+                self._loaded_policy_key = None
+                self._loaded_processors_key = None
+                if str(policy_specs.device).startswith("cuda") and torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+
+            policy_class = get_policy_class(self.policy_type)
+            self.policy = policy_class.from_pretrained(policy_specs.pretrained_name_or_path)
+            self.policy.to(self.device)
+            self._loaded_policy_key = policy_key
 
         # Load preprocessor and postprocessor, overriding device to match requested device
         device_override = {"device": self.device}
-        self.preprocessor, self.postprocessor = make_pre_post_processors(
-            self.policy.config,
-            pretrained_path=policy_specs.pretrained_name_or_path,
-            preprocessor_overrides={
-                "device_processor": device_override,
-                "rename_observations_processor": {"rename_map": policy_specs.rename_map},
-            },
-            postprocessor_overrides={"device_processor": device_override},
+        processors_key = (
+            policy_specs.policy_type,
+            policy_specs.pretrained_name_or_path,
+            policy_specs.device,
+            tuple(sorted(policy_specs.rename_map.items())),
         )
+        if (
+            self.preprocessor is not None
+            and self.postprocessor is not None
+            and self._loaded_processors_key == processors_key
+        ):
+            self.logger.info("Reusing cached policy processors.")
+        else:
+            self.preprocessor, self.postprocessor = make_pre_post_processors(
+                self.policy.config,
+                pretrained_path=policy_specs.pretrained_name_or_path,
+                preprocessor_overrides={
+                    "device_processor": device_override,
+                    "rename_observations_processor": {"rename_map": policy_specs.rename_map},
+                },
+                postprocessor_overrides={"device_processor": device_override},
+            )
+            self._loaded_processors_key = processors_key
+
+        if hasattr(self.policy, "reset"):
+            self.policy.reset()
 
         end = time.perf_counter()
 
-        self.logger.info(f"Time taken to put policy on {self.device}: {end - start:.4f} seconds")
+        self.logger.info(f"Time taken to prepare policy on {self.device}: {end - start:.4f} seconds")
 
         return services_pb2.Empty()
 

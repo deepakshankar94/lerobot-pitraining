@@ -312,6 +312,16 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
         **postprocessor_kwargs,
     )
 
+    if cfg.rename_map:
+        rename_step_updated = False
+        for step_processor in preprocessor.steps:
+            if hasattr(step_processor, "rename_map"):
+                step_processor.rename_map = cfg.rename_map
+                rename_step_updated = True
+                break
+        if not rename_step_updated and is_main_process:
+            logging.warning("rename_map was provided, but no rename processor was found in the preprocessor.")
+
     if is_main_process:
         logging.info("Creating optimizer and scheduler")
     optimizer, lr_scheduler = make_optimizer_and_scheduler(cfg, policy)
